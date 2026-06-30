@@ -1,0 +1,74 @@
+name: Update Scoop manifest
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  update-scoop:
+    name: Update Scoop bucket
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get release info
+        id: release
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+          # Download checksums from gvu release
+          curl -sL "https://github.com/gomodvanityurls/gvu/releases/download/${TAG}/checksums.txt" \
+            -o /tmp/checksums.txt
+          cat /tmp/checksums.txt
+
+          # Extract SHA256 for each Windows binary
+          AMD64_HASH=$(grep 'gvu-windows-amd64.exe' /tmp/checksums.txt | awk '{print $1}')
+          ARM64_HASH=$(grep 'gvu-windows-arm64.exe' /tmp/checksums.txt | awk '{print $1}')
+          echo "amd64_hash=$AMD64_HASH" >> $GITHUB_OUTPUT
+          echo "arm64_hash=$ARM64_HASH" >> $GITHUB_OUTPUT
+
+      - name: Checkout scoop-bucket
+        uses: actions/checkout@v4
+        with:
+          repository: gomodvanityurls/scoop-bucket
+          token: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+          path: scoop-bucket
+
+      - name: Update manifest
+        run: |
+          VERSION="${{ steps.release.outputs.version }}"
+          TAG="${{ steps.release.outputs.tag }}"
+
+          python3 -c "
+          import json
+          with open('scoop-bucket/bucket/gvu.json') as f:
+              m = json.load(f)
+          m['version'] = '$VERSION'
+          hashes = {'64bit': '${{ steps.release.outputs.amd64_hash }}', 'arm64': '${{ steps.release.outputs.arm64_hash }}'}
+          for arch in ['64bit', 'arm64']:
+              key = 'amd64' if arch == '64bit' else 'arm64'
+              m['architecture'][arch]['url'] = f'https://github.com/gomodvanityurls/gvu/releases/download/$TAG/gvu-windows-{key}.exe'
+              m['architecture'][arch]['hash'] = hashes[arch]
+              m['architecture'][arch]['bin'] = [[f'gvu-windows-{key}.exe', 'gvu']]
+          with open('scoop-bucket/bucket/gvu.json', 'w') as f:
+              json.dump(m, f, indent=4)
+              f.write('\n')
+          print(json.dumps(m, indent=4))
+          "
+
+      - name: Push to scoop-bucket
+        run: |
+          cd scoop-bucket
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add bucket/gvu.json
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore: update gvu to ${{ steps.release.outputs.version }}"
+            git push
+          fi
